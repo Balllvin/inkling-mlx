@@ -1,27 +1,60 @@
 # inkling-mlx
 
-High-throughput MLX + Metal 4 inference engine for [`thinkingmachines/Inkling-2-Mini`](https://huggingface.co/thinkingmachines/Inkling-2-Mini) on Apple Silicon.
+High-throughput MLX + Metal 4 inference engine for [`thinkingmachines/Inkling-2-Mini`](https://huggingface.co/thinkingmachines/Inkling-2-Mini) on Apple Silicon ([Hugging Face model card](https://huggingface.co/balllvin/Inkling-2-Mini-MLX)).
 
 Runs the full released model as-is with **3 loop passes (48 layer visits/token)**, **unquantized 256k BF16 KV cache**, **bit-exact mixed NVFP4 / MXFP8 / BF16 weights**, and the built-in **`mtp.safetensors`** speculative drafter over an OpenAI-compatible HTTP/SSE API (`/v1/chat/completions`, `/v1/models`, `/health`).
+
+> **Hardware target:** Built and tuned specifically for **Apple M5** (per-core Metal 4 Neural Accelerators / NAX). Measured and verified on a **MacBook Pro (`Mac17,9`) with Apple M5 Pro (18-core CPU: 6 Super + 12 Performance, 20-core GPU, Metal 4), 64 GB unified memory, macOS 26.5.1 (Xcode 26.5 SDK), MLX 0.32.4**. See [Chip Compatibility & Porting Guide](#chip-compatibility--porting-guide) for older M1–M4 Macs (`--skip-build` fallback or fork instructions).
+
+---
+
+## Prerequisites, Model & RAM Requirements
+
+### Model to Download
+
+This engine runs the official [`thinkingmachines/Inkling-2-Mini`](https://huggingface.co/thinkingmachines/Inkling-2-Mini) Hugging Face checkpoint unmodified (`~20.2 GB` download, **`>= 25 GB` free SSD space** recommended):
+
+- `model-00001-of-00001.safetensors` (`~19.53 GB`, mixed NVFP4 / MXFP8 / BF16 text + vision weights)
+- `mtp.safetensors` (`~0.64 GB`, built-in 3-layer speculative drafter)
+- `config.json` and tokenizer files
+
+Download ahead of time into `~/models/Inkling-2-Mini` with `inkling-mlx download --repo thinkingmachines/Inkling-2-Mini --local-dir ~/models/Inkling-2-Mini`, or pass `--model thinkingmachines/Inkling-2-Mini` directly to `inkling-mlx serve` to fetch and cache it automatically on first launch.
+
+### Unified RAM Requirements
+
+| Unified Memory | Support Status | Recommended Setup / Limits |
+|---|---|---|
+| **16–24 GB** | Not supported | Resident text + MTP runtime exceeds `20 GB` even before KV cache and prefill scratch. |
+| **32 GB** | Minimum | Single-stream (`B=1`) short/medium context (`<= 16k–32k`); use `--no-mtp --cache-limit-gb 2.0`. |
+| **48 GB** | Supported | `B=1..4` with MTP up to `64k–128k`, or `B=1` up to `256k` with `--no-mtp`. |
+| **64 GB** | **Recommended (Tested)** | Full `256k` BF16 KV context with MTP (`~29.6 GiB` active, `~38.6 GB` peak, `0` swap), `B=1..4` concurrent MTP agents, or up to `B=64` plain batched decode at `ctx=512` (`41.3 GB` peak, `0` swap). |
+| **96–128 GB+** | Supported | Multiple concurrent `128k–256k` streams and larger prefix caches. |
+
+### Software Requirements
+
+- **Native Apple M5 Metal 4 + NAX path (recommended):** Apple M5 / M5 Pro / M5 Max / M5 Ultra Mac, **macOS 26+**, Xcode Command Line Tools (`xcode-select --install`), and Python `3.11–3.13` (or `uv`).
+- **MLX-only fallback (untested on M1–M4):** Apple Silicon Mac with Metal 3.1+ (macOS 14+), Python `3.11–3.13`, launched with `inkling-mlx serve --skip-build` so Metal 4 libraries are not compiled.
 
 ---
 
 ## Agent Quickstart Prompt
 
-Copy and paste this prompt into any coding agent on an Apple Silicon Mac (macOS 26+, Xcode Command Line Tools):
+Copy and paste this prompt into any coding agent on an Apple Silicon Mac:
 
 ```text
 Set up and verify `inkling-mlx` on this Mac:
-1. Clone `https://github.com/Balllvin/inkling-mlx` (or use the current repo directory if already cloned) and `cd` into it.
-2. Create a Python 3.11+ venv, install the package (`pip install -e .`), and run `bash scripts/build_native.sh` to compile all four Metal 4 native libraries with zero errors.
-3. Download `thinkingmachines/Inkling-2-Mini` from Hugging Face into `~/models/Inkling-2-Mini` using `inkling-mlx download --repo thinkingmachines/Inkling-2-Mini --local-dir ~/models/Inkling-2-Mini` (skip if `config.json`, `model-00001-of-00001.safetensors`, and `mtp.safetensors` are already present).
-4. Run the verification suite:
-   - `PYTHONPATH=src .venv/bin/python -m unittest tests/test_engine.py -v`
-   - `PYTHONPATH=src .venv/bin/python tests/test_flash_attn.py`
-   - `PYTHONPATH=src .venv/bin/python tests/test_prefill_moe.py`
-   - `PYTHONPATH=src .venv/bin/python tests/test_mtp_draft.py`
-5. Start the OpenAI-compatible server on `127.0.0.1:8095` via `.venv/bin/inkling-mlx serve --model ~/models/Inkling-2-Mini --host 127.0.0.1 --port 8095` and wait until `http://127.0.0.1:8095/health` reports `"ready": true`.
-6. Send one test request to `http://127.0.0.1:8095/v1/chat/completions` and report the `/health` JSON, completion text, usage, and throughput metrics.
+1. Check hardware and memory (`system_profiler SPHardwareDataType`): confirm Apple Silicon with >= 32 GB unified RAM (64 GB recommended). Confirm whether this Mac has an Apple M5-family chip and macOS 26+ with Xcode Command Line Tools installed.
+2. Clone `https://github.com/Balllvin/inkling-mlx` (or use the current repo directory if already cloned) and `cd` into it.
+3. Run `bash scripts/setup.sh` (or create a Python 3.11–3.13 venv, `pip install -e .`, and run `bash scripts/build_native.sh` on Apple M5 / macOS 26+). On older M1–M4 Macs or < macOS 26, skip building the Metal 4 dylibs and use `--skip-build` (MLX fallback, see README Compatibility section).
+4. Download `thinkingmachines/Inkling-2-Mini` from Hugging Face into `~/models/Inkling-2-Mini` using `.venv/bin/inkling-mlx download --repo thinkingmachines/Inkling-2-Mini --local-dir ~/models/Inkling-2-Mini` (skip if `config.json`, `model-00001-of-00001.safetensors`, and `mtp.safetensors` are already present).
+5. Run the verification suite:
+   - `.venv/bin/python -m unittest tests/test_engine.py -v`
+   - On Apple M5 / macOS 26+ after `build_native.sh` succeeds:
+     - `.venv/bin/python tests/test_flash_attn.py`
+     - `.venv/bin/python tests/test_prefill_moe.py`
+     - `.venv/bin/python tests/test_mtp_draft.py`
+6. Start the OpenAI-compatible server on `127.0.0.1:8095` via `.venv/bin/inkling-mlx serve --model ~/models/Inkling-2-Mini --host 127.0.0.1 --port 8095` (add `--skip-build` on non-M5 / < macOS 26, and `--no-mtp --cache-limit-gb 2.0` if unified RAM is 32 GB) and wait until `http://127.0.0.1:8095/health` reports `"ready": true`.
+7. Send one test request to `http://127.0.0.1:8095/v1/chat/completions` and report the `/health` JSON, completion text, usage, and throughput metrics.
 ```
 
 ---
@@ -32,17 +65,19 @@ Set up and verify `inkling-mlx` on this Mac:
 git clone https://github.com/Balllvin/inkling-mlx.git
 cd inkling-mlx
 
-# One-shot setup: creates .venv, installs inkling-mlx, compiles Metal 4 .dylibs, and downloads weights
+# One-shot setup (Apple M5 + macOS 26+): creates .venv, installs inkling-mlx, compiles Metal 4 .dylibs, and downloads weights
 DOWNLOAD_MODEL=1 bash scripts/setup.sh
 
 # Or step by step
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-inkling-mlx build
+inkling-mlx build          # Requires Apple M5 + macOS 26+ (omit on M1-M4 / < macOS 26 and pass --skip-build below)
 inkling-mlx download --repo thinkingmachines/Inkling-2-Mini --local-dir ~/models/Inkling-2-Mini
 
 # Serve OpenAI-compatible API (auto-downloads from HF if passed a repo ID)
 inkling-mlx serve --model ~/models/Inkling-2-Mini --host 127.0.0.1 --port 8095
+# On 32 GB Macs: add --no-mtp --cache-limit-gb 2.0
+# On M1-M4 / < macOS 26: add --skip-build
 ```
 
 Example request:
@@ -57,6 +92,41 @@ curl -s http://127.0.0.1:8095/v1/chat/completions \
     "temperature": 0.0
   }'
 ```
+
+---
+
+## Chip Compatibility & Porting Guide
+
+This engine is **built and tuned specifically for Apple M5** (`Apple10` GPU family: M5, M5 Pro, M5 Max, M5 Ultra) and has **only been tested on Apple M5 Pro (`Mac17,9`, 20-core GPU, 64 GB unified RAM, macOS 26.5.1)**.
+
+### Why Older M-Series Chips (M1 / M2 / M3 / M4) Are Not Natively Supported Out of the Box
+
+| Subsystem | Apple M5 (`Apple10`, macOS 26+) | Apple M1 / M2 / M3 / M4 (`Apple7`–`Apple9`) | Why |
+|---|---|---|---|
+| **Metal 4.0 NAX FlashAttention** (`native/flash_attn_nax.mm`) | Native 4x speedup | Not supported natively | Uses `MetalPerformancePrimitives` (`mpp::tensor_ops::matmul2d`) targeting M5 per-core Neural Accelerators and `MTLLanguageVersion4_0`. |
+| **Metal 4.0 NAX Prefill MoE** (`native/prefill_moe_nax.mm`) | Native 21–27 TFLOP/s | Not supported natively | Uses `MTLLanguageVersion4_0` + `mpp::tensor_ops::matmul2d` (`M >= 128`) unavailable on M1–M4 hardware. |
+| **Native 1-CB Decode & MTP** (`native/decode_runner.mm`, `native/mtp_draft_runner.mm`) | Compiles & runs (`B=1..4` MTP + batched) | Fails build / init without edits | `mtp_draft_runner.mm` hardcodes `MTLLanguageVersion4_0` even though its shaders are pure SIMT, and `decode_runner.mm` aborts init if `lib_nax` (`MTLLanguageVersion4_0`, used at `M >= 9`) fails to compile. |
+| **MLX + Metal 3.1 SIMT Fallback** (`fused.py`, `kernels.py`, `moe_kernels.py`, `mtp.py`) | Available (`--no-native` / fallback) | **Supported in code (untested on M1–M4)** | `kernels.py` and `moe_kernels.py` use standard Metal 3.1 (`simdgroup_bfloat8x8`, `moe_m1_experts`, `moe_grouped_tiles`) and all native `.dylib` loaders return `None` when `.dylib`s are absent. |
+| **NVIDIA CUDA / AMD ROCm / Intel / CPU-only** | — | Not supported | Engine depends on Apple Unified Memory, Metal, and `mlx`. |
+
+> **Running on M1 / M2 / M3 / M4 today (untested):** If `inkling-mlx build` or `scripts/build_native.sh` fails on `< macOS 26` or non-M5 hardware, run **`inkling-mlx serve --skip-build --model ...`**. All four native loaders (`try_create_native_decode_runner`, `try_create_native_mtp_runner`, `_get_flash_attn_lib`, `_get_prefill_moe_lib`) return `None` when the `.dylib`s are absent or fail to init, falling back automatically to the pure MLX + Metal 3.1 SIMT kernels (`moe_m1_experts`, `moe_grouped_tiles`, `relative_attention_nax`). Because we do not have M1–M4 machines here, that fallback has not been benchmarked on M1–M4.
+
+### How to Fork / Adapt This Repo for Apple M1–M4 (or Other Chips)
+
+A human or coding agent can unlock native single-command-buffer `B=1` decode and SIMT MTP on **M1 / M2 / M3 / M4** (without M5 NAX) with four focused changes:
+
+1. **Guard Metal 4.0 NAX in `src/inkling_mlx/native/decode_runner.mm`**:
+   - Around the `if (cfg->max_m >= 8)` NAX compilation block (`MTLLanguageVersion4_0` / `kMetal4NaxSource`), wrap `MTLLanguageVersion4_0` with `#if defined(__MAC_26_0)` and leave `ctx->lib_nax = nil` on failure instead of returning `nullptr` from init.
+   - Gate `use_nax_qkv` and `use_nax_head` (`M >= 9` verification/batched paths) on `(ctx->lib_nax != nil)` instead of returning `-12`, so `M >= 9` dispatches fall through to the existing SIMT paths already in `decode_runner.mm`.
+2. **Lower `MTLLanguageVersion` in `src/inkling_mlx/native/mtp_draft_runner.mm`**:
+   - Change `opts.languageVersion = MTLLanguageVersion4_0` to `MTLLanguageVersion3_2` (or `MTLLanguageVersion3_1` on macOS 14). The MTP drafter kernels are pure SIMT / GEMV and contain no `mpp::tensor_ops` calls.
+3. **Make NAX prefill `.dylib`s optional in `scripts/build_native.sh` and `src/inkling_mlx/cli.py`**:
+   - Build only `libinkling_decode.dylib` and `libinkling_mtp_draft.dylib` when targeting M1–M4 or Xcode `< 26`. Python prefill automatically falls back to MLX `relative_attention_nax` (`kernels.py`) and `moe_grouped_tiles` / `mx.gather_qmm` (`moe_kernels.py`) when `libinkling_flash_attn.dylib` and `libinkling_prefill_moe.dylib` are absent.
+4. **Re-tune and gate parity on target silicon**:
+   - Benchmark `MTLMathModeSafe` vs fast math and threadgroup widths (`128` vs `256`) on `Apple7`/`Apple8`/`Apple9` register files, and verify parity with `tests/test_engine.py` and `tests/test_decode_runner.py`.
+   - *(Note on `simdgroup_bfloat8x8`: supported on Metal 3.1+ / M1+ `Apple7` and newer, so `kernels.py` BF16 SIMD-group GEMMs work on M1–M4 under macOS 14+.)*
+
+**Porting to CUDA / ROCm / non-Apple accelerators:** Keep the model spec and scheduling logic from [`model.py`](src/inkling_mlx/model.py), [`config.py`](src/inkling_mlx/config.py), [`mtp.py`](src/inkling_mlx/mtp.py), and [`parser.py`](src/inkling_mlx/parser.py) (3-loop 48-visit core with depth residuals & message gates, causal `ShortConv`, hybrid SWA + Toeplitz relative bias + query-dependent sinks, NVFP4 layers 0–19 / MXFP8 layers 20–23 MoE, built-in DSpark + MarkovHead MTP), and swap the MLX / `.mm` Metal runners for CUDA Graphs, Triton, FlashAttention, and CUTLASS FP4/FP8 grouped GEMMs (e.g. Blackwell).
 
 ---
 

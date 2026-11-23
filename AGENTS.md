@@ -2,6 +2,8 @@
 
 Use this file when building, testing, editing, or serving `inkling-mlx` on Apple Silicon.
 
+Targets **Apple M5 (`Apple10` / Metal 4 NAX on macOS 26+, >= 32 GB unified RAM; tested on Apple M5 Pro 64 GB)** for full native throughput. On older M1–M4 Macs or `< macOS 26`, pass `--skip-build` to `inkling-mlx serve` to fall back to the pure MLX + Metal 3.1 path (untested on M1–M4); see [README.md](README.md#chip-compatibility--porting-guide) for fork instructions.
+
 ## Repository Layout
 
 - `src/inkling_mlx/`: Python package implementing the model (`model.py`, `config.py`), fused Metal MLX ops (`kernels.py`, `moe_kernels.py`, `fused.py`), built-in MTP drafter (`mtp.py`), zero-copy native ctypes wrappers (`native_decode.py`, `native_mtp.py`), continuous-batching scheduler & HTTP server (`engine.py`, `serve.py`, `parser.py`, `cli.py`).
