@@ -1214,7 +1214,123 @@ def sanitize_text_weights(raw_weights: dict[str, mx.array]) -> dict[str, mx.arra
     return out
 
 
-def load_model(model_dir: str | Path) -> tuple[LanguageModel, Any, ModelConfig]:
+_PEFT_ATTN_MAP = {
+    "self_attn.q_proj.linear": "self_attn.q_proj",
+    "self_attn.k_proj.linear": "self_attn.k_proj",
+    "self_attn.v_proj.linear": "self_attn.v_proj",
+    "self_attn.o_proj.linear": "self_attn.o_proj",
+    "self_attn.o_proj.gate_proj": "self_attn.gate_proj",
+    "self_attn.relative_position_bias.linear": "self_attn.r_proj",
+    "self_attn.sink_proj": "self_attn.sink_proj",
+}
+_PEFT_GATE_PREFIXES = tuple(
+    f"{gate}.{proj}"
+    for gate in ("q_message_gate", "k_message_gate", "v_message_gate", "mlp_message_gate")
+    for proj in ("down_proj", "forget_gate_proj", "message_gate_proj")
+)
+
+
+def _locate_peft_adapter_dir(adapter_dir: str | Path) -> Path:
+    root = Path(adapter_dir).expanduser()
+    for candidate in (root, root / "adapter"):
+        if (candidate / "adapter_config.json").is_file() and (candidate / "adapter_model.safetensors").is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"PEFT LoRA adapter not found in {root} or {root / 'adapter'} "
+        "(expected adapter_config.json and adapter_model.safetensors)."
+    )
+
+
+def _map_peft_key_to_mlx(key: str) -> tuple[str | None, str | None, bool]:
+    """Return `(mlx_weight_key, 'A'|'B', skipped_vision)` for one PEFT tensor key."""
+    if ".lora_A." in key:
+        which = "A"
+        mod = key.split(".lora_A.", 1)[0]
+    elif ".lora_B." in key:
+        which = "B"
+        mod = key.split(".lora_B.", 1)[0]
+    else:
+        return None, None, False
+
+    for prefix in ("base_model.model.model.", "base_model.model.", "model."):
+        if mod.startswith(prefix):
+            mod = mod[len(prefix) :]
+            break
+
+    if mod.startswith("vision_tower.") or ".vision_tower." in mod:
+        return None, which, True
+
+    if mod.startswith("language_model.layers."):
+        mod = mod[len("language_model.") :]
+    if not mod.startswith("layers."):
+        raise ValueError(f"Unsupported PEFT LoRA target module: {key}")
+
+    parts = mod.split(".", 2)
+    if len(parts) != 3:
+        raise ValueError(f"Malformed PEFT layer module path: {key}")
+    layer_idx, rest = parts[1], parts[2]
+    if rest in _PEFT_ATTN_MAP:
+        mapped = _PEFT_ATTN_MAP[rest]
+    elif rest in _PEFT_GATE_PREFIXES:
+        mapped = rest
+    else:
+        raise ValueError(f"Unsupported Inkling PEFT LoRA suffix '{rest}' in key: {key}")
+    return f"model.layers.{layer_idx}.{mapped}.weight", which, False
+
+
+def apply_peft_lora_adapter(clean_weights: dict[str, mx.array], adapter_dir: str | Path) -> dict[str, int]:
+    """Merge a PEFT LoRA adapter (`lora_A`/`lora_B`) into sanitized Inkling-2-Mini text weights."""
+    adir = _locate_peft_adapter_dir(adapter_dir)
+    cfg = json.loads((adir / "adapter_config.json").read_text())
+    r = float(cfg["r"])
+    alpha = float(cfg.get("lora_alpha", r))
+    if r <= 0:
+        raise ValueError(f"Adapter rank r must be positive, got {r}")
+    scale = alpha / r
+
+    raw_lora = mx.load(str(adir / "adapter_model.safetensors"))
+    if raw_lora:
+        mx.eval(*raw_lora.values())
+
+    grouped: dict[str, dict[str, mx.array]] = {}
+    skipped_vision = 0
+    for key, tensor in raw_lora.items():
+        target, which, is_vision = _map_peft_key_to_mlx(key)
+        if is_vision:
+            skipped_vision += 1
+            continue
+        if target is None or which is None:
+            continue
+        grouped.setdefault(target, {})[which] = tensor
+
+    merged = 0
+    for target, pair in grouped.items():
+        if "A" not in pair or "B" not in pair:
+            raise ValueError(f"Incomplete LoRA pair for {target}: got keys {sorted(pair.keys())}")
+        if target not in clean_weights:
+            raise ValueError(f"Target weight '{target}' not present in sanitized base model weights")
+        base_w = clean_weights[target]
+        a = pair["A"]
+        b = pair["B"]
+        if b.shape[0] != base_w.shape[0] or a.shape[1] != base_w.shape[1] or a.shape[0] != b.shape[1]:
+            raise ValueError(
+                f"Shape mismatch merging LoRA into {target}: base={base_w.shape}, A={a.shape}, B={b.shape}"
+            )
+        delta = (b.astype(mx.float32) @ a.astype(mx.float32)) * scale
+        updated = (base_w.astype(mx.float32) + delta).astype(base_w.dtype)
+        clean_weights[target] = updated
+        merged += 1
+
+    if merged == 0:
+        raise ValueError(f"No text LoRA modules merged from {adir}")
+    mx.eval(*(clean_weights[t] for t in grouped))
+    return {"merged_modules": merged, "skipped_vision_tensors": skipped_vision}
+
+
+def load_model(
+    model_dir: str | Path,
+    adapter_dir: Optional[str | Path] = None,
+) -> tuple[LanguageModel, Any, ModelConfig]:
     """Load Inkling 2 Mini natively into MLX without weight requantization or FP32 lm_head copy."""
     from transformers import AutoTokenizer
 
@@ -1226,6 +1342,14 @@ def load_model(model_dir: str | Path) -> tuple[LanguageModel, Any, ModelConfig]:
     raw_weights = mx.load(str(path / "model-00001-of-00001.safetensors"))
     clean_weights = sanitize_text_weights(raw_weights)
     del raw_weights
+
+    if adapter_dir is not None:
+        stats = apply_peft_lora_adapter(clean_weights, adapter_dir)
+        print(
+            f"[inkling] Merged {stats['merged_modules']} LoRA text modules from {adapter_dir} "
+            f"(skipped {stats['skipped_vision_tensors']} vision tensors)",
+            flush=True,
+        )
 
     lm.load_weights(list(clean_weights.items()), strict=True)
     mx.eval(lm.parameters())

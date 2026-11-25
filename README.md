@@ -5,6 +5,7 @@
 - **GitHub (Code & Native Metal 4 Engine):** [`github.com/Balllvin/inkling-mlx`](https://github.com/Balllvin/inkling-mlx)
 - **Hugging Face (Model Card & Setup Mirror):** [`huggingface.co/balllvin/Inkling-2-Mini-MLX`](https://huggingface.co/balllvin/Inkling-2-Mini-MLX)
 - **Base Weights (Apache 2.0):** [`huggingface.co/thinkingmachines/Inkling-2-Mini`](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+- **BS Code / DeepSeek Harness Adapter:** [`huggingface.co/balllvin/BS-0.5-Mini`](https://huggingface.co/balllvin/BS-0.5-Mini) — optimized for [`Balllvin/BS`](https://github.com/Balllvin/BS) (`bscode`) and DeepSeek Harness PTC mode (agent teamwork on or off); pass `--adapter balllvin/BS-0.5-Mini` to `inkling-mlx serve` on Apple Silicon / MLX, or pair [`thinkingmachines/Inkling-2-Mini`](https://huggingface.co/thinkingmachines/Inkling-2-Mini) on non-MLX hosts.
 - **Included Optimization Playbook:** [`skills/mlx-apple-silicon-inference/SKILL.md`](skills/mlx-apple-silicon-inference/SKILL.md)
 
 ---

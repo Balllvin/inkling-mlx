@@ -83,9 +83,13 @@ def make_handler(
     *,
     model_id: str,
     model_path: Path | None = None,
+    adapter_id: str | None = None,
     activity_cb: Any = None,
 ):
     allowed_models = _allowed_model_names(model_id, model_path)
+    if adapter_id:
+        allowed_models.add(adapter_id)
+        allowed_models.add(f"{model_id}+{adapter_id}")
     created_ts = int(time.time())
 
     class InklingHandler(BaseHTTPRequestHandler):
@@ -128,6 +132,7 @@ def make_handler(
                     {
                         "ok": True,
                         "model": model_id,
+                        "adapter": adapter_id,
                         "ready": True,
                         "mlx_active_gb": round(mx.get_active_memory() / 1e9, 3),
                         "mlx_peak_gb": round(mx.get_peak_memory() / 1e9, 3),
@@ -360,6 +365,7 @@ def warmup_engine(engine: InklingEngine) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Inkling 2 Mini OpenAI-compatible MLX engine")
     p.add_argument("--model", default="thinkingmachines/Inkling-2-Mini")
+    p.add_argument("--adapter", default=None, help="Optional PEFT LoRA adapter local directory or HF repo ID (e.g. balllvin/BS-0.5-Mini)")
     p.add_argument("--model-id", default="inkling-2-mini")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8095)
@@ -378,11 +384,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     mx.set_cache_limit(max(0, int(args.cache_limit_gb * (1 << 30))))
-    from .cli import resolve_model_dir
+    from .cli import resolve_adapter_dir, resolve_model_dir
     model_path = resolve_model_dir(args.model)
+    adapter_path = resolve_adapter_dir(args.adapter) if args.adapter else None
     t0 = time.perf_counter()
     print(f"[inkling] loading {model_path} ...", flush=True)
-    model, tokenizer, _cfg = load_model(model_path)
+    model, tokenizer, _cfg = load_model(model_path, adapter_dir=adapter_path)
     load_s = time.perf_counter() - t0
     print(f"[inkling] loaded in {load_s:.2f}s (active={mx.get_active_memory()/1e9:.2f} GB)", flush=True)
 
@@ -422,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
         engine,
         model_id=args.model_id,
         model_path=model_path,
+        adapter_id=args.adapter,
         activity_cb=_on_activity,
     )
     ThreadingHTTPServer.allow_reuse_address = True

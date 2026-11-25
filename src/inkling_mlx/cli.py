@@ -76,6 +76,19 @@ def resolve_model_dir(spec: str) -> Path:
     return Path(snapshot_download(repo_id=spec))
 
 
+def resolve_adapter_dir(spec: str) -> Path:
+    """Resolve a PEFT LoRA adapter from a local directory or Hugging Face repo ID."""
+    expanded = Path(spec).expanduser()
+    if expanded.is_dir():
+        if (expanded / "adapter_config.json").is_file() or (expanded / "adapter" / "adapter_config.json").is_file():
+            return expanded
+        raise FileNotFoundError(f"Adapter directory {expanded} does not contain adapter_config.json")
+    from huggingface_hub import snapshot_download
+
+    print(f"[download] Resolving adapter {spec} from Hugging Face Hub...", flush=True)
+    return Path(snapshot_download(repo_id=spec))
+
+
 def download_model(repo_id: str, local_dir: str | None) -> Path:
     from huggingface_hub import snapshot_download
 
